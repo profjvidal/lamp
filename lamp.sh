@@ -54,14 +54,20 @@ if [[ -z "$ADMIN_PASS" || "$ADMIN_PASS" != "$ADMIN_CONFIRM" ]]; then
   exit 1
 fi
 
-# MariaDB aceita uma expressão hexadecimal convertida para texto via CONVERT.
-# Assim a senha não é interpolada como literal SQL e caracteres especiais são preservados.
+# Codifica a senha em hexadecimal para preservar caracteres especiais.
+# O MariaDB monta o comando ALTER USER usando QUOTE() e SQL preparado.
 PASS_HEX=$(printf '%s' "$ADMIN_PASS" | od -An -tx1 -v | tr -d ' \n')
 unset ADMIN_PASS ADMIN_CONFIRM
 
 mariadb --protocol=socket <<SQL
 CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY 'senha_temporaria_substituida';
-SET PASSWORD FOR 'admin'@'localhost' = PASSWORD(CONVERT(X'${PASS_HEX}' USING utf8mb4));
+SET @sql = CONCAT(
+  "ALTER USER 'admin'@'localhost' IDENTIFIED BY ",
+  QUOTE(CONVERT(0x${PASS_HEX} USING utf8mb4))
+);
+PREPARE alter_admin FROM @sql;
+EXECUTE alter_admin;
+DEALLOCATE PREPARE alter_admin;
 GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;
 SQL
 unset PASS_HEX
