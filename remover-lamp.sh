@@ -1,76 +1,47 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+trap 'echo "[ERRO] Falha na linha $LINENO. Remocao interrompida." >&2' ERR
 
-#!/bin/bash
-
-# Remocao completa do ambiente LAMP no Debian
-
-if [ "$EUID" -ne 0 ]; then
-    echo "Execute este script como root ou utilizando sudo."
-    exit 1
+if (( EUID != 0 )); then
+  echo 'Execute como root (ou com sudo, se disponivel).' >&2
+  exit 1
 fi
 
-echo "======================================"
-echo " REMOCAO COMPLETA DO AMBIENTE LAMP"
-echo "======================================"
-
-echo ""
-echo "ATENCAO: Esta operacao removera:"
-echo "- Apache"
-echo "- PHP e extensoes"
-echo "- MariaDB"
-echo "- phpMyAdmin"
-echo "- Bancos de dados"
-echo "- Arquivos e configuracoes"
-
-echo ""
-read -p "Deseja continuar? (s/N): " resposta
-
-if [[ ! "$resposta" =~ ^[sS]$ ]]; then
-    echo "Operacao cancelada."
-    exit 0
+echo '=== REMOCAO COMPLETA DO AMBIENTE LAMP ==='
+echo 'ATENCAO: apaga bancos MariaDB, configuracoes e /var/www/html.'
+read -r -p 'Deseja continuar? (digite REMOVER): ' resposta
+if [[ "$resposta" != 'REMOVER' ]]; then
+  echo 'Operacao cancelada.'
+  exit 0
 fi
 
-echo ""
-echo "[1/5] Parando os servicos..."
+# O dbconfig-common precisa acessar o MariaDB durante o purge do phpMyAdmin.
+echo '[1/5] Preparando remocao do phpMyAdmin...'
+if dpkg-query -W -f='${Status}' mariadb-server 2>/dev/null | grep -q 'install ok installed'; then
+  systemctl start mariadb
+fi
 
-systemctl stop apache2 2>/dev/null
-systemctl stop mariadb 2>/dev/null
+if dpkg-query -W -f='${Status}' phpmyadmin 2>/dev/null | grep -qE 'installed|config-files|half-configured|unpacked'; then
+  echo '[2/5] Removendo phpMyAdmin com MariaDB ativo...'
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y phpmyadmin
+else
+  echo '[2/5] phpMyAdmin nao esta instalado.'
+fi
 
-echo "[2/5] Removendo Apache, PHP e phpMyAdmin..."
+echo '[3/5] Removendo Apache, PHP e MariaDB...'
+# Selecionar somente pacotes instalados ou com arquivos de configuracao pendentes.
+mapfile -t pacotes < <(dpkg-query -W -f='${binary:Package}\t${db:Status-Abbrev}\n' 2>/dev/null | awk '$2 ~ /^(ii|rc|iU|iF|hi)/ && $1 ~ /^(apache2($|-)|libapache2-mod-php|php([0-9.]|$|-)|mariadb($|-)|mysql-common$)/ {print $1}')
+if (( ${#pacotes[@]} > 0 )); then
+  DEBIAN_FRONTEND=noninteractive apt-get purge -y "${pacotes[@]}"
+fi
 
-apt purge -y \
-    apache2 \
-    apache2-bin \
-    apache2-data \
-    apache2-utils \
-    libapache2-mod-php* \
-    php* \
-    phpmyadmin
+echo '[4/5] Excluindo dados e configuracoes do laboratorio...'
+rm -rf -- /var/lib/mysql /etc/mysql /var/www/html /etc/php /var/log/mysql /var/log/apache2 /var/cache/apache2
+# Remover apenas a configuracao criada para phpMyAdmin.
+rm -f -- /etc/apache2/conf-available/phpmyadmin.conf /etc/apache2/conf-enabled/phpmyadmin.conf
 
-echo "[3/5] Removendo MariaDB..."
+echo '[5/5] Limpando dependencias...'
+DEBIAN_FRONTEND=noninteractive apt-get autoremove --purge -y
+apt-get autoclean
 
-apt purge -y \
-    mariadb-server \
-    mariadb-client \
-    mariadb-common \
-    mariadb-server-core* \
-    mariadb-client-core*
-
-echo "[4/5] Removendo arquivos e diretorios..."
-
-rm -rf /var/lib/mysql
-rm -rf /etc/mysql
-rm -rf /var/www/html
-rm -rf /etc/php
-rm -rf /var/log/mysql
-rm -rf /var/log/apache2
-rm -rf /var/cache/apache2
-
-echo "[5/5] Limpando dependencias..."
-
-apt autoremove --purge -y
-apt autoclean
-
-echo ""
-echo "======================================"
-echo " REMOCAO CONCLUIDA!"
-echo "======================================"
+echo '=== REMOCAO CONCLUIDA ==='
