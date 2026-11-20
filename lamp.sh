@@ -1,59 +1,79 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
-#!/bin/bash
+trap 'echo "[ERRO] Falha na linha $LINENO. Instalação interrompida." >&2' ERR
 
-# Instalação automática do LAMP no Debian
-
-if [ "$EUID" -ne 0 ]; then
-    echo "Execute este script como root."
-    exit 1
+if [[ $EUID -ne 0 ]]; then
+  echo 'Execute como root: su - e depois ./lamp.sh (ou sudo ./lamp.sh).' >&2
+  exit 1
 fi
 
-echo "=================================="
-echo " INSTALACAO DO SERVIDOR LAMP"
-echo "=================================="
+export DEBIAN_FRONTEND=noninteractive
 
-echo "[1/4] Atualizando repositórios..."
-apt update
+echo '=== Instalação do ambiente LAMP (Debian) ==='
+apt-get update
+apt-get install -y apache2 mariadb-server php libapache2-mod-php php-mysql php-mbstring php-xml php-curl php-zip php-gd php-intl php-cli openssl
 
-echo "[2/4] Instalando Apache, MariaDB e PHP..."
-apt install -y \
-    apache2 \
-    mariadb-server \
-    mariadb-client \
-    php \
-    libapache2-mod-php \
-    php-cli \
-    php-mysql \
-    php-curl \
-    php-gd \
-    php-mbstring \
-    php-xml \
-    php-zip
+systemctl enable --now apache2 mariadb
 
-echo "[3/4] Instalando phpMyAdmin..."
-apt install -y phpmyadmin
+# Pré-configura o phpMyAdmin para utilizar Apache e evita perguntas interativas
+# do pacote; não cria automaticamente um usuário de aplicação via dbconfig-common.
+echo 'phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2' | debconf-set-selections
+echo 'phpmyadmin phpmyadmin/dbconfig-install boolean false' | debconf-set-selections
+apt-get install -y phpmyadmin
 
-echo "[4/4] Ativando serviços..."
+if [[ ! -f /etc/phpmyadmin/apache.conf ]]; then
+  echo '[ERRO] Configuração /etc/phpmyadmin/apache.conf não encontrada.' >&2
+  exit 1
+fi
 
-systemctl enable apache2
-systemctl enable mariadb
+if [[ ! -e /etc/apache2/conf-available/phpmyadmin.conf && ! -L /etc/apache2/conf-available/phpmyadmin.conf ]]; then
+  ln -s /etc/phpmyadmin/apache.conf /etc/apache2/conf-available/phpmyadmin.conf
+fi
 
-systemctl restart mariadb
-systemctl restart apache2
+a2enconf phpmyadmin
+phpenmod mbstring
+apache2ctl configtest
+systemctl reload apache2
 
-echo "=================================="
-echo " INSTALACAO CONCLUIDA!"
-echo "=================================="
+# O usuário root do MariaDB permanece com autenticação local via unix_socket.
+# O usuário administrativo abaixo é destinado exclusivamente a laboratórios.
+if ! mariadb --protocol=socket -e 'SELECT 1' >/dev/null 2>&1; then
+  echo '[ERRO] Não foi possível acessar o MariaDB como root via socket local.' >&2
+  exit 1
+fi
 
-echo "Apache: http://localhost"
-echo "phpMyAdmin: http://localhost/phpmyadmin"
-echo ""
-echo "Versao do PHP:"
-php -v
+echo
+read -r -s -p 'Defina uma senha forte para o usuário admin do MariaDB: ' ADMIN_PASS
+echo
+read -r -s -p 'Confirme a senha: ' ADMIN_CONFIRM
+echo
+if [[ -z "$ADMIN_PASS" || "$ADMIN_PASS" != "$ADMIN_CONFIRM" ]]; then
+  echo '[ERRO] Senhas vazias ou diferentes.' >&2
+  exit 1
+fi
 
-echo ""
-echo "Status dos servicos:"
-systemctl is-active apache2
-systemctl is-active mariadb
+# MariaDB aceita uma expressão hexadecimal convertida para texto via CONVERT.
+# Assim a senha não é interpolada como literal SQL e caracteres especiais são preservados.
+PASS_HEX=$(printf '%s' "$ADMIN_PASS" | od -An -tx1 -v | tr -d ' \n')
+unset ADMIN_PASS ADMIN_CONFIRM
 
-echo "=================================="
+mariadb --protocol=socket <<SQL
+CREATE USER IF NOT EXISTS 'admin'@'localhost' IDENTIFIED BY 'senha_temporaria_substituida';
+SET PASSWORD FOR 'admin'@'localhost' = PASSWORD(CONVERT(X'${PASS_HEX}' USING utf8mb4));
+GRANT ALL PRIVILEGES ON *.* TO 'admin'@'localhost' WITH GRANT OPTION;
+SQL
+unset PASS_HEX
+
+systemctl is-active --quiet apache2
+systemctl is-active --quiet mariadb
+
+IP_SERVIDOR=$(hostname -I 2>/dev/null | awk '{print $1}')
+IP_SERVIDOR=${IP_SERVIDOR:-IP-DO-SERVIDOR}
+echo
+echo '=== Instalação concluída ==='
+echo "Apache:      http://${IP_SERVIDOR}/"
+echo "phpMyAdmin:  http://${IP_SERVIDOR}/phpmyadmin"
+echo 'Usuário MariaDB/phpMyAdmin: admin'
+echo 'Senha: a que você acabou de definir.'
+echo 'ATENÇÃO: admin possui privilégios globais; utilize apenas em laboratório isolado.'
