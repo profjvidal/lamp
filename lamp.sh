@@ -19,7 +19,8 @@ systemctl enable --now apache2 mariadb
 # Pré-configura o phpMyAdmin para utilizar Apache e evita perguntas interativas
 # do pacote; não cria automaticamente um usuário de aplicação via dbconfig-common.
 echo 'phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2' | debconf-set-selections
-echo 'phpmyadmin phpmyadmin/dbconfig-install boolean false' | debconf-set-selections
+# Não pré-configurar phpmyadmin/dbconfig-install: essa pergunta pode não existir
+# no debconf antes da instalação do pacote em algumas versões do Debian.
 apt-get install -y phpmyadmin
 
 if [[ ! -f /etc/phpmyadmin/apache.conf ]]; then
